@@ -843,6 +843,19 @@ public class PropertySourcePropertyResolver implements PropertyResolver, AutoClo
     @SuppressWarnings("MagicNumber")
     protected void processPropertySource(PropertySource properties, PropertySource.PropertyConvention convention) {
         synchronized (catalogLock) {
+            // An unrelated source must not reroll an already resolved random placeholder.
+            // Remember only standalone random expressions; other cached placeholders can depend
+            // on a property source that is about to change and must be invalidated.
+            ResolverState currentState = readState();
+            Map<String, Object> randomValues = new HashMap<>();
+            Map<String, String> randomExpressions = new HashMap<>();
+            currentState.placeholderResolutionCache.forEach((name, cachedValue) -> {
+                String expression = standaloneRandomExpression(currentState, name);
+                if (expression != null) {
+                    randomValues.put(name, cachedValue);
+                    randomExpressions.put(name, expression);
+                }
+            });
             for (String property : properties) {
 
                 log.trace("Processing property key {}", property);
@@ -918,7 +931,29 @@ public class PropertySourcePropertyResolver implements PropertyResolver, AutoClo
             // A lookup can cache a miss between reset() and catalog reinitialization.
             // Clear those entries after the rebuilt catalog becomes visible.
             resetCaches();
+            randomValues.forEach((name, cachedValue) -> {
+                // An explicit override of the property must not retain the old random value.
+                if (Objects.equals(randomExpressions.get(name), standaloneRandomExpression(currentState, name))) {
+                    currentState.placeholderResolutionCache.put(name, cachedValue);
+                }
+            });
         }
+    }
+
+    @Nullable
+    private String standaloneRandomExpression(ResolverState currentState, String name) {
+        Map<String, DefaultPropertyEntry> entries = resolveEntriesForKey(currentState, name, PropertyCatalog.GENERATED);
+        DefaultPropertyEntry entry = entries == null ? null : entries.get(name);
+        if (entry == null) {
+            entries = resolveEntriesForKey(currentState, name, PropertyCatalog.RAW);
+            entry = entries == null ? null : entries.get(name);
+        }
+        if (entry != null && entry.value() instanceof String expression
+            && expression.startsWith("${random.") && expression.endsWith("}")
+            && expression.indexOf("${", 2) < 0) {
+            return expression;
+        }
+        return null;
     }
 
     /**
