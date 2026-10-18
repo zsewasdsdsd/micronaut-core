@@ -17,8 +17,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -141,10 +141,10 @@ class LoomCarrierGroupTest {
         putLock.lock();
         try {
             group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
-            awaitQueuedThreads(putLock, 1); // IO virtual thread is waiting to notify listeners
-            Thread.ofPlatform().daemon().start(
+            awaitQueuedThread(putLock, runner.ioThread);
+            Thread bystander = Thread.ofPlatform().daemon().start(
                 () -> GlobalEventExecutor.INSTANCE.execute(bystanderDone::countDown));
-            awaitQueuedThreads(putLock, 2);
+            awaitQueuedThread(putLock, bystander);
 
             assertTrue(runner.carrier.isAlive(),
                 "carrier exited while its IO virtual thread was parked during termination");
@@ -169,11 +169,11 @@ class LoomCarrierGroupTest {
         return (ReentrantLock) lockField.get(queue);
     }
 
-    private static void awaitQueuedThreads(ReentrantLock lock, int count) throws InterruptedException {
+    private static void awaitQueuedThread(ReentrantLock lock, Thread thread) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (lock.getQueueLength() < count) {
+        while (!lock.hasQueuedThread(thread)) {
             assertTrue(System.nanoTime() < deadline,
-                "expected " + count + " waiters on the GlobalEventExecutor queue lock");
+                "expected " + thread.getName() + " to wait on the GlobalEventExecutor queue lock");
             Thread.sleep(10);
         }
     }
