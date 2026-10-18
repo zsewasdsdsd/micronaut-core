@@ -19,6 +19,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -99,6 +100,28 @@ class LoomCarrierGroupTest {
         CompletableFuture<Boolean> onRunner = new CompletableFuture<>();
         runner.eventLoop().execute(() -> onRunner.complete(runner.isOnRunner(Thread.currentThread())));
         assertTrue(onRunner.get(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void carrierDoesNotExitBeforeIoVirtualThread() throws Exception {
+        // Wait until the IO virtual thread has actually run. The event loop's
+        // terminationFuture can complete before that thread has finished
+        // notifying its listeners.
+        CompletableFuture<Void> started = new CompletableFuture<>();
+        runner.eventLoop().execute(() -> started.complete(null));
+        started.get(10, TimeUnit.SECONDS);
+
+        Thread carrier = runner.carrier;
+        Thread ioThread = runner.ioThread;
+        assertNotNull(carrier);
+        assertNotNull(ioThread);
+
+        group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+        assertTrue(group.awaitTermination(10, TimeUnit.SECONDS));
+        carrier.join(10_000);
+
+        assertFalse(carrier.isAlive(), "carrier failed to exit after event loop termination");
+        assertFalse(ioThread.isAlive(), "carrier exited while the IO virtual thread was still alive");
     }
 
     @Test
