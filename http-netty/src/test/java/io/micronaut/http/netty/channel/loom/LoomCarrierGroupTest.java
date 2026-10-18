@@ -2,11 +2,13 @@ package io.micronaut.http.netty.channel.loom;
 
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.util.concurrent.DefaultThreadFactory;
+import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.concurrent.ThreadPerTaskExecutor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -15,6 +17,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -122,6 +125,57 @@ class LoomCarrierGroupTest {
 
         assertFalse(carrier.isAlive(), "carrier failed to exit after event loop termination");
         assertFalse(ioThread.isAlive(), "carrier exited while the IO virtual thread was still alive");
+    }
+
+    @Test
+    void carrierStaysAliveWhileIoTerminationNotificationIsBlocked() throws Exception {
+        CompletableFuture<Void> started = new CompletableFuture<>();
+        runner.eventLoop().execute(() -> started.complete(null));
+        started.get(10, TimeUnit.SECONDS);
+
+        // Netty marks ManualIoEventLoop as TERMINATED before notifying its
+        // termination future. Blocking that notification must not cause the
+        // carrier to exit and abandon the parked IO virtual thread.
+        ReentrantLock putLock = globalExecutorPutLock();
+        CountDownLatch bystanderDone = new CountDownLatch(1);
+        putLock.lock();
+        try {
+            group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+            awaitQueuedThreads(putLock, 1); // IO virtual thread is waiting to notify listeners
+            Thread.ofPlatform().daemon().start(
+                () -> GlobalEventExecutor.INSTANCE.execute(bystanderDone::countDown));
+            awaitQueuedThreads(putLock, 2);
+
+            assertTrue(runner.carrier.isAlive(),
+                "carrier exited while its IO virtual thread was parked during termination");
+        } finally {
+            putLock.unlock();
+        }
+
+        assertTrue(bystanderDone.await(10, TimeUnit.SECONDS),
+            "GlobalEventExecutor remained blocked after the IO notification resumed");
+        assertTrue(group.awaitTermination(10, TimeUnit.SECONDS));
+        runner.carrier.join(10_000);
+        assertFalse(runner.carrier.isAlive());
+        assertFalse(runner.ioThread.isAlive(), "IO virtual thread was abandoned by the carrier");
+    }
+
+    private static ReentrantLock globalExecutorPutLock() throws ReflectiveOperationException {
+        Field queueField = GlobalEventExecutor.class.getDeclaredField("taskQueue");
+        queueField.setAccessible(true);
+        Object queue = queueField.get(GlobalEventExecutor.INSTANCE);
+        Field lockField = queue.getClass().getDeclaredField("putLock");
+        lockField.setAccessible(true);
+        return (ReentrantLock) lockField.get(queue);
+    }
+
+    private static void awaitQueuedThreads(ReentrantLock lock, int count) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (lock.getQueueLength() < count) {
+            assertTrue(System.nanoTime() < deadline,
+                "expected " + count + " waiters on the GlobalEventExecutor queue lock");
+            Thread.sleep(10);
+        }
     }
 
     @Test
