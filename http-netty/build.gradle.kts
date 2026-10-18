@@ -61,7 +61,7 @@ tasks {
     }
     test {
         forkEvery = 1
-        jvmArgs("--add-opens=java.base/java.lang=ALL-UNNAMED")
+        jvmArgs("--add-opens=java.base/java.lang=ALL-UNNAMED", "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED")
         filter {
             excludeTestsMatching("io.micronaut.http.netty.allocator.DefaultAllocatorSpec")
         }
