@@ -402,7 +402,11 @@ public final class LoomCarrierGroup extends MultiThreadIoEventLoopGroup {
             ioThread.start();
             assert ioContinuationScheduled;
 
-            while (!delegate.isTerminated()) {
+            // The event loop marks itself terminated before the IO virtual thread
+            // finishes its termination listeners. Keep its carrier alive until the
+            // IO continuation has completed, otherwise that continuation can be
+            // scheduled onto a carrier which has already exited.
+            while (ioThread.isAlive()) {
                 boolean ioContinuationScheduled = this.ioContinuationScheduled;
                 // Only park when there is no other work: continuations left over from the last
                 // time slice, or queued without an unpark (e.g. by a virtual thread mounted on this
